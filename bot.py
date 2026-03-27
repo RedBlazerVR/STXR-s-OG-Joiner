@@ -73,7 +73,9 @@ async def on_message(message):
 
 @bot.event
 async def setup_hook():
-    port = int(os.environ.get("PORT", 8080))
+    # Render automatically tells the bot which port to use via an environment variable
+    import os
+    port = int(os.environ.get("PORT", 10000)) # Render's default is 10000
     bot.loop.create_task(app.run_task(host='0.0.0.0', port=port))
 
 bot.run(TOKEN)
