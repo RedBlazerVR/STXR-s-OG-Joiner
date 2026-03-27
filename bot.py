@@ -2,18 +2,23 @@ import os, asyncio, aiohttp, discord, uvicorn
 from discord.ext import commands
 from quart import Quart
 
+# --- WEB SERVER ---
 app = Quart(__name__)
+
 @app.route('/')
 async def home(): return "STXR's OG Joiner: ONLINE"
 
+# --- BOT SETUP ---
+# Grabs token from Render Environment Variables
 TOKEN = os.getenv('DISCORD_TOKEN')
+
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 async def deep_scan(place_id, target_uid):
-    # Use a single session to prevent "Unclosed connector" errors
     async with aiohttp.ClientSession() as session:
+        # Get target headshot
         t_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={target_uid}&size=48x48&format=Png"
         async with session.get(t_url) as r:
             t_data = await r.json()
@@ -37,9 +42,13 @@ async def deep_scan(place_id, target_uid):
                             return s['id'], page
                 
                 cursor = servers.get('nextPageCursor')
-                if not cursor: break
+                if not cursor or page > 10: break # Limit to 10 pages to prevent timeout
                 page += 1
         return None, page
+
+@bot.event
+async def on_ready():
+    print(f"✅ LOGGED IN AS: {bot.user}")
 
 @bot.event
 async def on_message(message):
@@ -53,14 +62,20 @@ async def on_message(message):
                 await status.edit(content=f"🎯 **TARGET FOUND**\n`STXR_WARP|{job_id}`")
             else:
                 await status.edit(content=f"❌ **MISS** (Pages: {pages})")
-        except: pass
+        except Exception as e:
+            print(f"Chat Error: {e}")
 
-async def main():
+# --- BOOT ENGINE ---
+async def start_engine():
     port = int(os.environ.get("PORT", 10000))
-    # This runs the web server AND the bot inside one loop
     config = uvicorn.Config(app, host="0.0.0.0", port=port, log_level="info")
     server = uvicorn.Server(config)
-    await asyncio.gather(server.serve(), bot.start(TOKEN))
+    
+    # Run both simultaneously
+    await asyncio.gather(
+        server.serve(),
+        bot.start(TOKEN)
+    )
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(start_engine())
