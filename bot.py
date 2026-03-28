@@ -8,28 +8,27 @@ SECRET = "BRAINROT_2026"
 app = FastAPI()
 session_container = {"session": None}
 
-async def get_target_thumb(session, user_id):
-    """Retries until Roblox actually gives us a finished thumbnail URL"""
-    url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png"
-    for _ in range(5): # 5 attempts to catch 'Pending' states
-        async with session.get(url) as r:
-            data = await r.json()
-            if data and data.get('data'):
-                item = data['data'][0]
-                if item.get('state') == 'Completed':
-                    return item.get('imageUrl')
-        await asyncio.sleep(1.5)
-    return None
-
 async def stxr_warp_scan(place_id, user_id):
-    if not session_container["session"]: session_container["session"] = aiohttp.ClientSession()
+    if not session_container["session"]: 
+        session_container["session"] = aiohttp.ClientSession()
     session = session_container["session"]
     
-    target_img = await get_target_thumb(session, user_id)
+    # 1. Get Target Headshot (Wait for it to be 'Completed')
+    target_img = None
+    thumb_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png"
+    for _ in range(3):
+        async with session.get(thumb_url) as r:
+            t_data = await r.json()
+            if t_data and 'data' in t_data and t_data['data'][0]['state'] == 'Completed':
+                target_img = t_data['data'][0]['imageUrl']
+                break
+        await asyncio.sleep(1)
+    
     if not target_img: return None
 
+    # 2. Deep Scan ALL Servers (Parallelized)
     cursor = ""
-    for _ in range(25): # Scan 2500 players
+    for _ in range(40): # Scan up to 4,000 players
         api_url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&cursor={cursor}"
         async with session.get(api_url) as r:
             data = await r.json()
@@ -71,17 +70,16 @@ async def handle_snipe(request: Request):
                     "title": "🎯 TARGET VERIFIED",
                     "color": 16777215,
                     "fields": [
-                        {"name": "Item", "value": item, "inline": True},
+                        {"name": "Item", "value": f"**{item}**", "inline": True},
                         {"name": "Mutation", "value": mut, "inline": True},
-                        {"name": "Join", "value": f"[CLICK HERE]({link})"}
+                        {"name": "Join", "value": f"[CLICK TO JOIN]({link})"}
                     ],
                     "thumbnail": {"url": f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png"}
                 }]
             }
             await log_session.post(WEBHOOK_URL, json=payload)
-        return {"status": "success", "jobId": job_id}
     
-    return {"status": "not_found"}
+    return {"status": "success" if job_id else "not_found", "jobId": job_id}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
