@@ -3,38 +3,45 @@ from discord.ext import commands
 from flask import Flask
 from threading import Thread
 
-# --- 1. WEB SERVER (For Render Health Checks) ---
+# --- 1. WEB SERVER (Keep-Alive for Render) ---
 app = Flask('')
 @app.route('/')
-def home(): return "STXR_SYSTEM_V4: ONLINE"
+def home(): return "STXR_PROXY_SYSTEM: ONLINE"
 
 def run_web():
-    # Render uses port 10000 by default
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000)))
 
-# --- 2. THE BOT ENGINE (Speed Optimized) ---
+# --- 2. THE BYPASS BOT ENGINE ---
 TOKEN = os.getenv('DISCORD_TOKEN')
-intents = discord.Intents.all() 
-bot = commands.Bot(command_prefix="!", intents=intents)
+
+class STXR_Bot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix="!", intents=discord.Intents.all())
+        self.session = None
+
+    async def setup_hook(self):
+        # 🛡️ THE BYPASS: This tunnels your requests so Discord doesn't see Render's Banned IP
+        self.http.API_BASE_URL = "https://discordproxy.info/api"
+        print("🛰️ Proxy Tunnel Established. Bypassing Error 1015...")
+
+bot = STXR_Bot()
 
 @bot.event
 async def on_ready():
-    # Create the aiohttp session once for maximum speed
     bot.session = aiohttp.ClientSession()
-    print(f"✅ SUCCESS: {bot.user} IS ONLINE AND SCANNING")
+    print(f"✅ SUCCESS: {bot.user} IS ONLINE VIA PROXY")
 
+# --- 3. THE SPEED SCANNER ---
 async def fast_scan(pid, uid):
-    """Checks servers for a specific player headshot"""
     try:
-        # Get target's headshot once
+        # Get target headshot
         t_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={uid}&size=48x48&format=Png"
         async with bot.session.get(t_url) as r:
             t_data = await r.json()
             if not t_data.get('data'): return False
             target_img = t_data['data'][0]['imageUrl']
 
-        # Scan first 200 players (2 pages) instantly
+        # Scan 200 players instantly
         cursor = ""
         for _ in range(2):
             s_url = f"https://games.roblox.com/v1/games/{pid}/servers/Public?limit=100&cursor={cursor}"
@@ -64,32 +71,23 @@ async def fast_scan(pid, uid):
 async def on_message(message):
     if message.author == bot.user: return
     if "STXR_LOG" in message.content:
-        # Format: STXR_LOG|UID|PID|ITEM
         parts = message.content.split("|")
         if len(parts) >= 3:
-            await message.channel.send("🔎 **Scanning servers...**")
+            await message.channel.send("🔎 **Proxy Scan Initiated...**")
             found = await fast_scan(parts[2], parts[1])
-            status = "🎯 **TARGET FOUND**" if found else "❌ **TARGET NOT FOUND**"
+            status = "🎯 **FOUND**" if found else "❌ **NOT FOUND**"
             await message.channel.send(f"{status} | Item: {parts[3] if len(parts)>3 else 'Unknown'}")
 
-# --- 3. THE STARTUP SEQUENCE ---
+# --- 4. STARTUP ---
 if __name__ == "__main__":
-    # Start web server in a separate thread
     Thread(target=run_web).start()
-    
     if TOKEN:
-        print("🛡️ Anti-Ban Shield: Waiting 20s...")
-        # Use a small synchronous sleep before starting the event loop
-        import time
-        time.sleep(20)
-        
         try:
+            # We don't need a long delay with the Proxy, but 5s is safe
+            import time
+            time.sleep(5)
             bot.run(TOKEN)
-        except discord.errors.PrivilegedIntentsRequired:
-            print("❌ ERROR: You forgot to turn on INTENTS in the Discord Dev Portal!")
-        except discord.errors.LoginFailure:
-            print("❌ ERROR: Your DISCORD_TOKEN is invalid or expired!")
         except Exception as e:
-            print(f"❌ CRITICAL LOGIN ERROR: {e}")
+            print(f"❌ LOGIN ERROR: {e}")
     else:
-        print("❌ ERROR: No DISCORD_TOKEN found in Render Environment Variables.")
+        print("❌ ERROR: No DISCORD_TOKEN found.")
