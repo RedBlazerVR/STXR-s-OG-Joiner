@@ -1,34 +1,38 @@
-import os, asyncio, aiohttp, uvicorn
+import os, asyncio, discord, aiohttp, uvicorn
+from discord.ext import commands
 from fastapi import FastAPI, Request
 
 # --- CONFIG ---
-WEBHOOK_URL = os.getenv('DISCORD_WEBHOOK_URL')
+TOKEN = os.getenv('DISCORD_TOKEN')
+LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
 SECRET = "BRAINROT_2026"
 
+# 1. Setup Discord Bot
+intents = discord.Intents.default()
+# You only need message_content if the bot needs to READ your messages.
+# For SENDING logs, default intents are usually fine.
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# 2. Setup FastAPI
 app = FastAPI()
 session_container = {"session": None}
 
-async def stxr_warp_scan(place_id, user_id):
-    if not session_container["session"]: 
+@bot.event
+async def on_ready():
+    if not session_container["session"]:
         session_container["session"] = aiohttp.ClientSession()
-    session = session_container["session"]
-    
-    # 1. Get Target Headshot (Wait for it to be 'Completed')
-    target_img = None
-    thumb_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png"
-    for _ in range(3):
-        async with session.get(thumb_url) as r:
-            t_data = await r.json()
-            if t_data and 'data' in t_data and t_data['data'][0]['state'] == 'Completed':
-                target_img = t_data['data'][0]['imageUrl']
-                break
-        await asyncio.sleep(1)
-    
-    if not target_img: return None
+    print(f"🤖 BOT LOGGED IN AS: {bot.user}")
 
-    # 2. Deep Scan ALL Servers (Parallelized)
+async def stxr_warp_scan(place_id, user_id):
+    session = session_container["session"]
+    # Get target headshot
+    async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png") as r:
+        t_data = await r.json()
+        if not t_data.get('data'): return None
+        target_img = t_data['data'][0]['imageUrl']
+
     cursor = ""
-    for _ in range(40): # Scan up to 4,000 players
+    for _ in range(40): # Scan 4,000 players
         api_url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&cursor={cursor}"
         async with session.get(api_url) as r:
             data = await r.json()
@@ -62,24 +66,29 @@ async def handle_snipe(request: Request):
 
     job_id = await stxr_warp_scan(pid, uid)
     
-    if job_id and WEBHOOK_URL:
-        async with aiohttp.ClientSession() as log_session:
-            link = f"https://www.roblox.com/games/{pid}?jobId={job_id}"
-            payload = {
-                "embeds": [{
-                    "title": "🎯 TARGET VERIFIED",
-                    "color": 16777215,
-                    "fields": [
-                        {"name": "Item", "value": f"**{item}**", "inline": True},
-                        {"name": "Mutation", "value": mut, "inline": True},
-                        {"name": "Join", "value": f"[CLICK TO JOIN]({link})"}
-                    ],
-                    "thumbnail": {"url": f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png"}
-                }]
-            }
-            await log_session.post(WEBHOOK_URL, json=payload)
+    if job_id:
+        # THE BOT SENDS THE MESSAGE HERE
+        channel = bot.get_channel(LOG_CHANNEL_ID)
+        if channel:
+            embed = discord.Embed(title="🎯 TARGET VERIFIED", color=0x000000)
+            embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png")
+            embed.add_field(name="Item", value=f"**{item}**")
+            embed.add_field(name="Join", value=f"[CLICK TO JOIN](https://www.roblox.com/games/{pid}?jobId={job_id})")
+            
+            # This pushes the message to the Discord loop
+            bot.loop.create_task(channel.send(embed=embed))
+            print(f"✅ Bot sent message to channel {LOG_CHANNEL_ID}")
+        else:
+            print(f"❌ Error: Bot can't find channel {LOG_CHANNEL_ID}")
+        
+        return {"status": "success", "jobId": job_id}
     
-    return {"status": "success" if job_id else "not_found", "jobId": job_id}
+    return {"status": "not_found"}
+
+# This is the "Magic" part that runs both at once
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(bot.start(TOKEN))
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
