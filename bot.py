@@ -3,32 +3,35 @@ from discord.ext import commands
 from flask import Flask
 from threading import Thread
 
-# --- 1. WEB SERVER (Answering Render's Health Check) ---
+# --- 1. WEB SERVER (For Render Health Checks) ---
 app = Flask('')
 @app.route('/')
-def home(): return "STXR_SYSTEM_V3: ONLINE"
+def home(): return "STXR_SYSTEM_V4: ONLINE"
 
 def run_web():
+    # Render uses port 10000 by default
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
 # --- 2. THE BOT ENGINE (Speed Optimized) ---
 TOKEN = os.getenv('DISCORD_TOKEN')
-intents = discord.Intents.all() # Ensure all intents are ON in Dev Portal
+intents = discord.Intents.all() 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
+    # Create the aiohttp session once for maximum speed
     bot.session = aiohttp.ClientSession()
     print(f"✅ SUCCESS: {bot.user} IS ONLINE AND SCANNING")
 
 async def fast_scan(pid, uid):
-    """Ultra-fast batch scanning for target user"""
+    """Checks servers for a specific player headshot"""
     try:
         # Get target's headshot once
         t_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={uid}&size=48x48&format=Png"
         async with bot.session.get(t_url) as r:
             t_data = await r.json()
+            if not t_data.get('data'): return False
             target_img = t_data['data'][0]['imageUrl']
 
         # Scan first 200 players (2 pages) instantly
@@ -54,30 +57,39 @@ async def fast_scan(pid, uid):
                 cursor = servers.get('nextPageCursor')
                 if not cursor: break
     except Exception as e:
-        print(f"Scan Error: {e}")
+        print(f"⚠️ Scan Error: {e}")
     return False
 
 @bot.event
 async def on_message(message):
     if message.author == bot.user: return
     if "STXR_LOG" in message.content:
-        # Expected format: STXR_LOG|UID|PID|ITEM
+        # Format: STXR_LOG|UID|PID|ITEM
         parts = message.content.split("|")
         if len(parts) >= 3:
+            await message.channel.send("🔎 **Scanning servers...**")
             found = await fast_scan(parts[2], parts[1])
-            status = "🎯 **FOUND**" if found else "❌ **NOT IN SERVERS**"
+            status = "🎯 **TARGET FOUND**" if found else "❌ **TARGET NOT FOUND**"
             await message.channel.send(f"{status} | Item: {parts[3] if len(parts)>3 else 'Unknown'}")
 
-# --- 3. THE STARTUP (Anti-Ban Sequence) ---
+# --- 3. THE STARTUP SEQUENCE ---
 if __name__ == "__main__":
-    # Start web server first so Render doesn't kill us
+    # Start web server in a separate thread
     Thread(target=run_web).start()
     
     if TOKEN:
-        # 20s Delay is the 'Shield' against Error 1015
-        print("🛡️ Anti-Ban Shield active. Waiting 20s to log in...")
+        print("🛡️ Anti-Ban Shield: Waiting 20s...")
+        # Use a small synchronous sleep before starting the event loop
         import time
         time.sleep(20)
-        bot.run(TOKEN)
+        
+        try:
+            bot.run(TOKEN)
+        except discord.errors.PrivilegedIntentsRequired:
+            print("❌ ERROR: You forgot to turn on INTENTS in the Discord Dev Portal!")
+        except discord.errors.LoginFailure:
+            print("❌ ERROR: Your DISCORD_TOKEN is invalid or expired!")
+        except Exception as e:
+            print(f"❌ CRITICAL LOGIN ERROR: {e}")
     else:
-        print("❌ ERROR: No DISCORD_TOKEN found in Environment Variables.")
+        print("❌ ERROR: No DISCORD_TOKEN found in Render Environment Variables.")
