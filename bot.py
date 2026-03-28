@@ -7,16 +7,10 @@ from fastapi import FastAPI, Request
 import uvicorn
 
 # --- CONFIG ---
-# These should be set in Railway Variables tab for safety
 TOKEN = os.getenv('DISCORD_TOKEN')
-try:
-    LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
-except:
-    LOG_CHANNEL_ID = 0
-
+LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
 SECRET = "BRAINROT_2026"
 
-# Init
 app = FastAPI()
 intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
@@ -28,69 +22,68 @@ async def on_ready():
         session_container["session"] = aiohttp.ClientSession()
     print(f"✅ STXR ENGINE ONLINE: {bot.user}")
 
-# --- SCANNER LOGIC ---
 async def stxr_scan(place_id, user_id):
     session = session_container["session"]
-    if not session: return None
-    try:
-        # Get headshot
-        async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png") as r:
-            t_data = await r.json()
-            if not t_data.get('data'): return None
-            target_img = t_data['data'][0]['imageUrl']
+    for attempt in range(3): # 3 Retries for API lag
+        try:
+            # 1. Get Target Thumb
+            thumb_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png"
+            async with session.get(thumb_url) as r:
+                t_data = await r.json()
+                if not t_data.get('data'): continue
+                target_img = t_data['data'][0]['imageUrl']
 
-        cursor = ""
-        for _ in range(3): # Scan 300 players (faster)
-            async with session.get(f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&cursor={cursor}") as r:
-                servers = await r.json()
-                if 'data' not in servers: break
-                for s in servers['data']:
-                    # Simple check: If user is in this server
-                    if any(user_id == p_id for p_id in s.get('playerIds', [])):
-                        return s.get('id')
-                cursor = servers.get('nextPageCursor')
-                if not cursor: break
-    except Exception as e:
-        print(f"Scan Error: {e}")
+            # 2. Scan Servers
+            cursor = ""
+            for _ in range(8): # Scan up to 800 players
+                api_url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&cursor={cursor}"
+                async with session.get(api_url) as r:
+                    servers = await r.json()
+                    if 'data' not in servers: break
+                    
+                    for s in servers['data']:
+                        tokens = s.get('playerTokens', [])
+                        if not tokens: continue
+                        
+                        # Batch check thumbnails
+                        payload = [{"token": t, "type": "AvatarHeadShot", "size": "48x48", "format": "png"} for t in tokens]
+                        async with session.post("https://thumbnails.roblox.com/v1/batch", json=payload) as b_res:
+                            batch = await b_res.json()
+                            if any(img.get('imageUrl') == target_img for img in batch.get('data', [])):
+                                return s.get('id')
+                    
+                    cursor = servers.get('nextPageCursor')
+                    if not cursor: break
+            await asyncio.sleep(1.5)
+        except Exception as e:
+            print(f"Scan Error: {e}")
     return None
 
-# --- API ENDPOINT ---
 @app.post("/stxr-log")
 async def handle_snipe(request: Request):
     data = await request.json()
-    if data.get("secret") != SECRET:
-        return {"status": "unauthorized"}
+    if data.get("secret") != SECRET: return {"status": "unauthorized"}
 
-    uid = data.get("userId")
-    pid = data.get("placeId")
-    item = data.get("itemName", "Unknown")
-    mutation = data.get("mutation", "None")
+    uid, pid = data.get("userId"), data.get("placeId")
+    item, mut = data.get("itemName", "Unknown"), data.get("mutation", "None")
 
-    # ⚡ Run Scan
     job_id = await stxr_scan(pid, uid)
-    
     if job_id:
-        # 🔊 Discord Log
         channel = bot.get_channel(LOG_CHANNEL_ID)
         if channel:
             link = f"https://www.roblox.com/games/{pid}?jobId={job_id}"
-            embed = discord.Embed(title="🎯 TARGET FOUND", color=0xFFFFFF)
+            embed = discord.Embed(title="🎯 TARGET VERIFIED", color=0xFFFFFF)
+            embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png")
             embed.add_field(name="Item", value=item, inline=True)
-            embed.add_field(name="Mutation", value=mutation, inline=True)
-            embed.add_field(name="Link", value=f"[CLICK TO JOIN]({link})", inline=False)
-            # Fire and forget the discord message so we don't hang the API
+            embed.add_field(name="Mutation", value=mut, inline=True)
+            embed.add_field(name="Action", value=f"[JOIN SERVER]({link})")
             bot.loop.create_task(channel.send(embed=embed))
-
-        return {"status": "success", "jobId": job_id, "itemName": item, "mutation": mutation}
+        return {"status": "success", "jobId": job_id, "itemName": item, "mutation": mut}
     
     return {"status": "not_found"}
 
-# --- LIFECYCLE MANAGEMENT ---
 @app.on_event("startup")
-async def startup_event():
-    # Start Discord Bot in the background
-    asyncio.create_task(bot.start(TOKEN))
+async def startup(): asyncio.create_task(bot.start(TOKEN))
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
