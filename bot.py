@@ -2,20 +2,20 @@ import os
 import asyncio
 import discord
 from discord.ext import commands
-from flask import Flask
-from threading import Thread
+from quart import Quart
+from hypercorn.asyncio import serve
+from hypercorn.config import Config
 
-# 1. THE WEB SERVER (Required for Render Free Tier)
-app = Flask('')
+# 1. THE WEB SERVER (Answering Render's door)
+app = Quart(__name__)
 
 @app.route('/')
-def home():
+async def home():
     return "STXR_SYSTEM: ONLINE"
 
-def run_web():
-    # Render uses port 10000 by default
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host='0.0.0.0', port=port)
+@app.route('/healthz')
+async def health():
+    return "OK", 200
 
 # 2. THE BOT ENGINE
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -25,21 +25,33 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 @bot.event
 async def on_ready():
-    print(f"✅ SUCCESS: {bot.user} IS ONLINE")
+    print(f"✅ BOT CONNECTED: {bot.user}")
 
 @bot.event
 async def on_message(message):
     if "STXR_LOG" in message.content:
-        await message.channel.send("🛰️ **System Received.** Scanning module loading...")
+        await message.channel.send("🛰️ **System Online.** Scanning module ready.")
 
-# 3. THE STARTUP
-if __name__ == "__main__":
-    # Start the web server in a separate thread so it doesn't block the bot
-    t = Thread(target=run_web)
-    t.start()
+# 3. THE STABLE STARTUP
+async def main():
+    # Setup Hypercorn Config for Render's Port
+    config = Config()
+    config.bind = [f"0.0.0.0:{os.environ.get('PORT', '10000')}"]
     
-    # Start the bot
-    if TOKEN:
-        bot.run(TOKEN)
-    else:
-        print("❌ ERROR: DISCORD_TOKEN is missing!")
+    print("⏳ Waiting 15s to bypass Discord Rate Limits...")
+    await asyncio.sleep(15) # Giving the IP a "Cool Down" period
+    
+    # Run both the Web Server and the Discord Bot together
+    try:
+        await asyncio.gather(
+            serve(app, config),
+            bot.start(TOKEN)
+        )
+    except Exception as e:
+        print(f"❌ CRITICAL ERROR: {e}")
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
