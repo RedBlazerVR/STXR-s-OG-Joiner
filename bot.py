@@ -3,7 +3,6 @@ from discord.ext import commands
 from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
 
-# --- CONFIG ---
 TOKEN = os.getenv('DISCORD_TOKEN')
 try:
     LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
@@ -27,35 +26,17 @@ session_container = {"session": None}
 
 @bot.event
 async def on_ready():
-    print(f"✅ STXR ONLINE: {bot.user} | Channel: {LOG_CHANNEL_ID}")
+    print(f"✅ STXR ACTIVE: {bot.user}")
 
 async def stxr_warp_scan(place_id, user_id):
     session = session_container["session"]
-    target_img = None
     
-    # Try multiple thumbnail types since Headshots fail often
-    thumb_types = [
-        f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png",
-        f"https://thumbnails.roblox.com/v1/users/avatar?userIds={user_id}&size=48x48&format=Png"
-    ]
-    
-    for url in thumb_types:
-        for _ in range(3): 
-            async with session.get(url) as r:
-                t_data = await r.json()
-                if t_data and 'data' in t_data and len(t_data['data']) > 0:
-                    item = t_data['data'][0]
-                    if item.get('state') == 'Completed' and item.get('imageUrl'):
-                        target_img = item.get('imageUrl')
-                        break
-            await asyncio.sleep(1)
-        if target_img: break
+    # 🎯 NEW: Direct Template Bypass (No more "Refused to provide thumbnail")
+    target_img_url = f"https://tr.rbxcdn.com/avatar-headshot/png/48/48/{user_id}/1"
+    print(f"🔍 Searching for UID: {user_id}")
 
-    if not target_img: return None
-
-    # Parallel Page Scan
     cursor = ""
-    for _ in range(40):
+    for _ in range(45): 
         api_url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&cursor={cursor}"
         async with session.get(api_url) as r:
             data = await r.json()
@@ -72,8 +53,12 @@ async def stxr_warp_scan(place_id, user_id):
             responses = await asyncio.gather(*tasks)
             for i, res in enumerate(responses):
                 batch = await res.json()
-                if any(img.get('imageUrl') == target_img for img in batch.get('data', [])):
-                    return s_ids[i]
+                # We check if any image in the server batch matches our target's predicted URL
+                for img in batch.get('data', []):
+                    # We check if the image URL contains the UserID or matches the pattern
+                    if str(user_id) in img.get('imageUrl', '') or img.get('imageUrl') == target_img_url:
+                        print(f"🎯 TARGET FOUND: {s_ids[i]}")
+                        return s_ids[i]
             
             cursor = data.get('nextPageCursor', "")
             if not cursor: break
@@ -81,18 +66,11 @@ async def stxr_warp_scan(place_id, user_id):
 
 @app.post("/stxr-log")
 async def handle_request(request: Request):
-    raw_data = await request.json()
-    print(f"📨 Incoming Request: {raw_data}") # Check logs for this!
+    data = await request.json()
+    if data.get("secret") != SECRET: return {"status": "unauthorized"}
 
-    if raw_data.get("secret") != SECRET: return {"status": "unauthorized"}
-
-    uid = raw_data.get("userId")
-    pid = raw_data.get("placeId")
-    item = raw_data.get("itemName", "Unknown")
-
-    if not uid or uid == "None" or uid == 0:
-        print("❌ ERROR: Roblox sent an invalid UserID.")
-        return {"status": "error", "message": "No UID"}
+    uid, pid = data.get("userId"), data.get("placeId")
+    item = data.get("itemName", "Unknown")
 
     job_id = await stxr_warp_scan(pid, uid)
 
@@ -100,12 +78,16 @@ async def handle_request(request: Request):
         channel = bot.get_channel(LOG_CHANNEL_ID) or await bot.fetch_channel(LOG_CHANNEL_ID)
         if channel:
             embed = discord.Embed(title="🎯 TARGET VERIFIED", color=0x000000)
+            embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png")
             embed.add_field(name="Item", value=f"**{item}**")
-            embed.add_field(name="Join", value=f"[CLICK HERE](https://www.roblox.com/games/{pid}?jobId={job_id})")
+            embed.add_field(name="Join", value=f"[CLICK TO JOIN](https://www.roblox.com/games/{pid}?jobId={job_id})")
             bot.loop.create_task(channel.send(embed=embed))
+            print("✅ DISCORD SENT")
             return {"status": "success", "jobId": job_id}
     
+    print(f"⚠️ {item} not found in public servers.")
     return {"status": "not_found"}
 
 if __name__ == "__main__":
+    # 🛠️ RAILWAY STAY ALIVE FIX: Use 0.0.0.0 and dynamic port
     uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8080)))
