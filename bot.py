@@ -3,94 +3,43 @@ from discord.ext import commands
 from fastapi import FastAPI, Request
 import uvicorn
 
-# --- BOT SETUP ---
+# --- CONFIGURATION ---
 TOKEN = os.getenv('DISCORD_TOKEN')
-LOG_CHANNEL_ID = 1234567890  # <--- Change this to your channel ID!
+LOG_CHANNEL_ID = 1487223696887255192  # <--- REPLACE THIS WITH YOUR CHANNEL ID
+SECRET = "BRAINROT_2026"
 
-class STXR_Sniper(commands.Bot):
-    def __init__(self):
-        super().__init__(command_prefix="!", intents=discord.Intents.all())
-        self.session = None
-
-    async def setup_hook(self):
-        print("🚀 STXR Engine: Active and Direct.")
-
-bot = STXR_Sniper()
+bot = commands.Bot(command_prefix="!", intents=discord.Intents.all())
 app = FastAPI()
+session_container = {"session": None}
 
 @bot.event
 async def on_ready():
-    if bot.session is None:
-        bot.session = aiohttp.ClientSession()
-    print(f"✅ STXR SNIPER ONLINE: {bot.user}")
+    session_container["session"] = aiohttp.ClientSession()
+    print(f"✅ STXR ENGINE ONLINE: {bot.user}")
+    await bot.change_presence(activity=discord.Game(name="STXR's OG Joiner"))
 
-# --- 🛰️ THE NEW EXECUTOR HANDLER ---
-@app.post("/stxr-log")
-async def handle_executor_snipe(request: Request):
-    data = await request.json()
-    
-    # Check the secret to prevent random people from spamming your bot
-    if data.get("secret") != "BRAINROT_2026":
-        return {"status": "unauthorized"}
-
-    uid = data.get("userId")
-    pid = data.get("placeId")
-    item = data.get("itemName", "Unknown Brainrot")
-
-    # 🛡️ Skip if unclaimed (as we set up before)
-    if not uid or str(uid) == "0" or str(uid).lower() == "unclaimed":
-        return {"status": "skipped_unclaimed"}
-
-    # Start the High-Speed Scan
-    job_id = await stxr_scan(pid, uid)
-    
-    channel = bot.get_channel(LOG_CHANNEL_ID)
-    if channel:
-        if job_id:
-            join_link = f"https://www.roblox.com/games/{pid}?jobId={job_id}"
-            
-            embed = discord.Embed(
-                title="🎯 TARGET VERIFIED", 
-                description=f"**{item}** found!", 
-                color=0xFFFFFF # Black & White Theme
-            )
-            embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png")
-            embed.add_field(name="👤 Owner ID", value=f"`{uid}`", inline=True)
-            embed.add_field(name="🕹️ Server ID", value=f"`{job_id[:15]}...`", inline=True)
-            embed.add_field(name="🔗 Action", value=f"[**CLICK TO JOIN SERVER**]({join_link})", inline=False)
-            embed.set_footer(text="STXR's OG Joiner | High-Speed Scan")
-            
-            await channel.send(embed=embed)
-        else:
-            # Optional: Log failures to a different channel or ignore
-            print(f"❌ Scan failed for {uid} in {pid}")
-
-    return {"status": "success"}
-
-# --- ⚡ THE SCANNER (Direct & Fast) ---
+# --- ⚡ HIGH SPEED SCANNER ---
 async def stxr_scan(place_id, user_id):
+    session = session_container["session"]
+    if not session: return None
     try:
-        # Get target headshot
-        thumb_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png"
-        async with bot.session.get(thumb_url) as r:
+        # Get target headshot to compare against server list
+        async with session.get(f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png") as r:
             t_data = await r.json()
-            if not t_data.get('data'): return None
-            target_img = t_data['data'][0].get('imageUrl')
+            target_img = t_data['data'][0]['imageUrl']
 
-        # Scan 3 pages (300 players)
         cursor = ""
-        for _ in range(3):
-            s_url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&cursor={cursor}"
-            async with bot.session.get(s_url) as r:
+        for _ in range(5): # Scan up to 500 players
+            async with session.get(f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&cursor={cursor}") as r:
                 servers = await r.json()
-                if not servers.get('data'): break
+                if not servers or 'data' not in servers: break
                 
                 tasks = []
                 for s in servers['data']:
                     tokens = s.get('playerTokens', [])
                     if tokens:
                         payload = [{"token": t, "type": "AvatarHeadShot", "size": "48x48", "format": "png"} for t in tokens]
-                        tasks.append(bot.session.post("https://thumbnails.roblox.com/v1/batch", json=payload))
+                        tasks.append(session.post("https://thumbnails.roblox.com/v1/batch", json=payload))
                 
                 responses = await asyncio.gather(*tasks)
                 for i, res in enumerate(responses):
@@ -101,17 +50,53 @@ async def stxr_scan(place_id, user_id):
                 cursor = servers.get('nextPageCursor')
                 if not cursor: break
     except Exception as e:
-        print(f"⚠️ Scan Error: {e}")
+        print(f"Scan Error: {e}")
     return None
 
-# --- 🚀 RUN COMMAND ---
-async def main():
-    # Railway provides the PORT env variable automatically
-    port = int(os.environ.get("PORT", 8080))
-    config = uvicorn.Config(app, host="0.0.0.0", port=port)
-    server = uvicorn.Server(config)
+# --- 🛰️ API RECEIVER (Talks to Roblox) ---
+@app.post("/stxr-log")
+async def handle_snipe(request: Request):
+    data = await request.json()
     
-    # Runs both FastAPI (for Roblox) and the Discord Bot at the same time
+    if data.get("secret") != SECRET:
+        return {"status": "unauthorized"}
+
+    uid = data.get("userId")
+    pid = data.get("placeId")
+    item = data.get("itemName", "Unknown")
+    mutation = data.get("mutation", "None")
+
+    # Start the scan
+    job_id = await stxr_scan(pid, uid)
+    
+    if job_id:
+        # 1. Send Discord Embed
+        channel = bot.get_channel(LOG_CHANNEL_ID)
+        if channel:
+            join_link = f"https://www.roblox.com/games/{pid}?jobId={job_id}"
+            embed = discord.Embed(title="🎯 TARGET VERIFIED", color=0xFFFFFF)
+            embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png")
+            embed.add_field(name="Item", value=f"**{item}**", inline=False)
+            embed.add_field(name="Mutation", value=mutation, inline=True)
+            embed.add_field(name="Action", value=f"[**CLICK TO JOIN**]({join_link})", inline=False)
+            await channel.send(embed=embed)
+
+        # 2. Return data to Roblox for the UI Entry
+        return {
+            "status": "success",
+            "jobId": job_id,
+            "itemName": item,
+            "userId": uid,
+            "mutation": mutation
+        }
+    
+    return {"status": "not_found"}
+
+# --- 🚀 RAILWAY BOOT ---
+async def main():
+    port = int(os.environ.get("PORT", 8080))
+    config = uvicorn.Config(app, host="0.0.0.0", port=port, loop="asyncio")
+    server = uvicorn.Server(config)
     await asyncio.gather(server.serve(), bot.start(TOKEN))
 
 if __name__ == "__main__":
