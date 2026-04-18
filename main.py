@@ -11,7 +11,6 @@ except:
     LOG_CHANNEL_ID = 0
 SECRET = "BRAINROT_2026"
 
-# 1. LIFESPAN HANDLER
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not session_container["session"]:
@@ -26,43 +25,33 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 session_container = {"session": None}
 
-@bot.event
-async def on_ready():
-    print(f"✅ STXR ENGINE ONLINE: {bot.user}")
-    print(f"📢 LOGGING TO: {LOG_CHANNEL_ID}")
+async def get_target_thumb(session, user_id):
+    """Retries 5 times to get a valid headshot URL for the target"""
+    url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png&isCircular=false"
+    for _ in range(5):
+        async with session.get(url) as r:
+            data = await r.json()
+            if data and 'data' in data and len(data['data']) > 0:
+                item = data['data'][0]
+                if item.get('state') == 'Completed':
+                    return item.get('imageUrl')
+        await asyncio.sleep(2)
+    return None
 
 async def stxr_warp_scan(place_id, user_id):
     session = session_container["session"]
-    target_img = None
+    target_img = await get_target_thumb(session, user_id)
     
-    # 🟢 TRIPLE-CHECK THUMBNAIL (Ensures we have a face to look for)
-    thumb_types = [
-        f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png",
-        f"https://thumbnails.roblox.com/v1/users/avatar?userIds={user_id}&size=48x48&format=Png"
-    ]
-    
-    for url in thumb_types:
-        for _ in range(3):
-            async with session.get(url) as r:
-                t_data = await r.json()
-                if t_data and 'data' in t_data and len(t_data['data']) > 0:
-                    item = t_data['data'][0]
-                    if item.get('state') == 'Completed' and item.get('imageUrl'):
-                        target_img = item.get('imageUrl')
-                        break
-            await asyncio.sleep(1)
-        if target_img: break
-
     if not target_img:
-        print(f"❌ FAILED: Could not acquire thumbnail for {user_id}")
+        print(f"❌ THUMBNAIL FAIL: Could not find headshot for {user_id}")
         return None
 
-    # 🔵 PARALLEL DEEP SCAN (Batches of 100)
+    # DEEP SCAN: Check up to 100 pages (10,000 servers/slots)
     cursor = ""
-    for page in range(45): 
-        print(f"📡 Scanning Page {page+1}...")
+    for page in range(100): 
         api_url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&cursor={cursor}"
         async with session.get(api_url) as r:
+            if r.status != 200: break
             data = await r.json()
             if 'data' not in data: break
             
@@ -76,10 +65,13 @@ async def stxr_warp_scan(place_id, user_id):
 
             responses = await asyncio.gather(*tasks)
             for i, res in enumerate(responses):
-                batch = await res.json()
-                if any(img.get('imageUrl') == target_img for img in batch.get('data', [])):
-                    print(f"🎯 MATCH FOUND: {s_ids[i]}")
-                    return s_ids[i]
+                try:
+                    batch = await res.json()
+                    for img in batch.get('data', []):
+                        if img.get('imageUrl') == target_img:
+                            print(f"🎯 FOUND MATCH IN PAGE {page+1}!")
+                            return s_ids[i]
+                except: continue
             
             cursor = data.get('nextPageCursor', "")
             if not cursor: break
@@ -94,25 +86,29 @@ async def handle_request(request: Request):
     pid = data.get("placeId")
     item = data.get("itemName", "Unknown")
 
-    print(f"📨 Claim Received! Item: {item} | User: {uid}")
+    print(f"📨 Logged Claim: {item} (User: {uid})")
 
-    # ⏳ GRACE PERIOD: Wait for Roblox API to catch up with the server change
-    await asyncio.sleep(5) 
+    # 🚀 THE "NEVER-MISS" LOOP
+    # We try scanning 3 times over 30 seconds to wait for Roblox API to update
+    for attempt in range(3):
+        print(f"🔎 Search attempt {attempt + 1} for {uid}...")
+        job_id = await stxr_warp_scan(pid, uid)
+        
+        if job_id:
+            channel = bot.get_channel(LOG_CHANNEL_ID) or await bot.fetch_channel(LOG_CHANNEL_ID)
+            if channel:
+                embed = discord.Embed(title="🎯 TARGET LOCATED", color=0x00FF00)
+                embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png")
+                embed.add_field(name="Item", value=f"**{item}**", inline=False)
+                embed.add_field(name="Join Link", value=f"[CLICK HERE TO JOIN](https://www.roblox.com/games/{pid}?jobId={job_id})")
+                bot.loop.create_task(channel.send(embed=embed))
+                return {"status": "success", "jobId": job_id}
+        
+        if attempt < 2:
+            print("⏳ Not found yet. Waiting 10s for API refresh...")
+            await asyncio.sleep(10)
 
-    job_id = await stxr_warp_scan(pid, uid)
-
-    if job_id:
-        channel = bot.get_channel(LOG_CHANNEL_ID) or await bot.fetch_channel(LOG_CHANNEL_ID)
-        if channel:
-            embed = discord.Embed(title="🎯 TARGET VERIFIED", color=0x000000)
-            embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png")
-            embed.add_field(name="Item", value=f"**{item}**", inline=True)
-            embed.add_field(name="Join", value=f"[CLICK TO JOIN](https://www.roblox.com/games/{pid}?jobId={job_id})")
-            bot.loop.create_task(channel.send(embed=embed))
-            print("✅ DISCORD NOTIFIED")
-            return {"status": "success", "jobId": job_id}
-    
-    print(f"⚠️ {item} scan finished. No match found.")
+    print(f"❌ SCAN EXPIRED: {uid} was not found in the public server list.")
     return {"status": "not_found"}
 
 if __name__ == "__main__":
