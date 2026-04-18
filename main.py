@@ -1,14 +1,12 @@
-import os, asyncio, aiohttp, uvicorn, discord
+import os, asyncio, aiohttp, uvicorn, discord, io
 from discord.ext import commands
 from fastapi import FastAPI, Request
 from contextlib import asynccontextmanager
+from PIL import Image
 
 # --- CONFIG ---
 TOKEN = os.getenv('DISCORD_TOKEN')
-try:
-    LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
-except:
-    LOG_CHANNEL_ID = 0
+LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', 0))
 SECRET = "BRAINROT_2026"
 
 @asynccontextmanager
@@ -25,33 +23,42 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix="!", intents=intents)
 session_container = {"session": None}
 
-async def get_target_thumb(session, user_id):
-    """Retries 5 times to get a valid headshot URL for the target"""
-    url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png&isCircular=false"
-    for _ in range(5):
-        async with session.get(url) as r:
-            data = await r.json()
-            if data and 'data' in data and len(data['data']) > 0:
-                item = data['data'][0]
-                if item.get('state') == 'Completed':
-                    return item.get('imageUrl')
-        await asyncio.sleep(2)
+# --- IMAGE PROCESSING ---
+async def get_image_bytes(session, url):
+    """Downloads an image and returns its raw bytes"""
+    async with session.get(url) as r:
+        if r.status == 200:
+            return await r.read()
     return None
 
+def images_match(img1_bytes, img2_bytes):
+    """Compares two images pixel by pixel (ignoring format differences)"""
+    try:
+        img1 = Image.open(io.BytesIO(img1_bytes)).convert('RGB').resize((48, 48))
+        img2 = Image.open(io.BytesIO(img2_bytes)).convert('RGB').resize((48, 48))
+        # Simple pixel difference check
+        return list(img1.getdata()) == list(img2.getdata())
+    except:
+        return False
+
+# --- SCANNING ENGINE ---
 async def stxr_warp_scan(place_id, user_id):
     session = session_container["session"]
-    target_img = await get_target_thumb(session, user_id)
     
-    if not target_img:
-        print(f"❌ THUMBNAIL FAIL: Could not find headshot for {user_id}")
-        return None
+    # 1. Get Target Image
+    target_url = f"https://thumbnails.roblox.com/v1/users/avatar-headshot?userIds={user_id}&size=48x48&format=Png&isCircular=false"
+    async with session.get(target_url) as r:
+        t_data = await r.json()
+        target_img_url = t_data['data'][0]['imageUrl']
+    
+    target_bytes = await get_image_bytes(session, target_img_url)
+    if not target_bytes: return None
 
-    # DEEP SCAN: Check up to 100 pages (10,000 servers/slots)
     cursor = ""
-    for page in range(100): 
+    for page in range(60): 
+        print(f"📡 Visual Scanning Page {page+1}...")
         api_url = f"https://games.roblox.com/v1/games/{place_id}/servers/Public?limit=100&cursor={cursor}"
         async with session.get(api_url) as r:
-            if r.status != 200: break
             data = await r.json()
             if 'data' not in data: break
             
@@ -65,13 +72,15 @@ async def stxr_warp_scan(place_id, user_id):
 
             responses = await asyncio.gather(*tasks)
             for i, res in enumerate(responses):
-                try:
-                    batch = await res.json()
-                    for img in batch.get('data', []):
-                        if img.get('imageUrl') == target_img:
-                            print(f"🎯 FOUND MATCH IN PAGE {page+1}!")
+                batch = await res.json()
+                for img_data in batch.get('data', []):
+                    current_url = img_data.get('imageUrl')
+                    if current_url:
+                        # Download current player's face to compare pixels
+                        current_bytes = await get_image_bytes(session, current_url)
+                        if current_bytes and images_match(target_bytes, current_bytes):
+                            print(f"🎯 PIXEL MATCH FOUND!")
                             return s_ids[i]
-                except: continue
             
             cursor = data.get('nextPageCursor', "")
             if not cursor: break
@@ -82,33 +91,22 @@ async def handle_request(request: Request):
     data = await request.json()
     if data.get("secret") != SECRET: return {"status": "unauthorized"}
 
-    uid = data.get("userId")
-    pid = data.get("placeId")
-    item = data.get("itemName", "Unknown")
+    uid, pid, item = data.get("userId"), data.get("placeId"), data.get("itemName", "Unknown")
+    print(f"📨 Claim Received: {item} for User {uid}")
 
-    print(f"📨 Logged Claim: {item} (User: {uid})")
+    await asyncio.sleep(8) # Wait for Roblox API to refresh
+    job_id = await stxr_warp_scan(pid, uid)
 
-    # 🚀 THE "NEVER-MISS" LOOP
-    # We try scanning 3 times over 30 seconds to wait for Roblox API to update
-    for attempt in range(3):
-        print(f"🔎 Search attempt {attempt + 1} for {uid}...")
-        job_id = await stxr_warp_scan(pid, uid)
-        
-        if job_id:
-            channel = bot.get_channel(LOG_CHANNEL_ID) or await bot.fetch_channel(LOG_CHANNEL_ID)
-            if channel:
-                embed = discord.Embed(title="🎯 TARGET LOCATED", color=0x00FF00)
-                embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png")
-                embed.add_field(name="Item", value=f"**{item}**", inline=False)
-                embed.add_field(name="Join Link", value=f"[CLICK HERE TO JOIN](https://www.roblox.com/games/{pid}?jobId={job_id})")
-                bot.loop.create_task(channel.send(embed=embed))
-                return {"status": "success", "jobId": job_id}
-        
-        if attempt < 2:
-            print("⏳ Not found yet. Waiting 10s for API refresh...")
-            await asyncio.sleep(10)
-
-    print(f"❌ SCAN EXPIRED: {uid} was not found in the public server list.")
+    if job_id:
+        channel = bot.get_channel(LOG_CHANNEL_ID) or await bot.fetch_channel(LOG_CHANNEL_ID)
+        if channel:
+            embed = discord.Embed(title="🎯 TARGET VERIFIED (PIXEL MATCH)", color=0x00FF00)
+            embed.set_thumbnail(url=f"https://www.roblox.com/headshot-thumbnail/image?userId={uid}&width=150&height=150&format=png")
+            embed.add_field(name="Item", value=f"**{item}**", inline=False)
+            embed.add_field(name="Join", value=f"[CLICK TO JOIN](https://www.roblox.com/games/{pid}?jobId={job_id})")
+            bot.loop.create_task(channel.send(embed=embed))
+            return {"status": "success", "jobId": job_id}
+    
     return {"status": "not_found"}
 
 if __name__ == "__main__":
