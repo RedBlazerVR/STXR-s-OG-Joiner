@@ -1,5 +1,2 @@
 discord.py
-aiohttp
-fastapi
-uvicorn
-Pillow
+Flask
